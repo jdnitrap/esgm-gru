@@ -12,6 +12,8 @@ edge's fixed tau.
 import json
 import torch
 
+from learning_rules import LearningRule, HebbianLearning
+
 CONTRADICTION_LR = 0.05
 TAU_TRUST_THRESHOLD = 0.3
 
@@ -20,7 +22,7 @@ class ESGRGraph:
     def __init__(self, n_nodes=8192, mean_out_degree=12, active_fraction=0.05,
                  eta=1e-2, lam=1e-3, seed=0, max_activation=5.0, max_weight=2.0,
                  use_hard_clip=False, modulation_decay=0.97, max_activation_rate=None,
-                 split_sparsity_at=None):
+                 split_sparsity_at=None, learning_rule: LearningRule = None):
         g = torch.Generator().manual_seed(seed)
         self.n = n_nodes
         self.active_fraction = active_fraction
@@ -29,6 +31,11 @@ class ESGRGraph:
         self.max_activation = max_activation
         self.max_weight = max_weight
         self.use_hard_clip = use_hard_clip
+        # Pluggable weight-update rule -- see learning_rules.py. None
+        # (default) is HebbianLearning(), the exact rule this graph
+        # always used; every existing caller is unaffected unless it
+        # opts into a different rule.
+        self.learning_rule = learning_rule if learning_rule is not None else HebbianLearning()
 
         pairs = set()
         src_list, dst_list = [], []
@@ -374,14 +381,9 @@ class ESGRGraph:
         # two-factor rule) unless something has actually been confirmed
         # or rejected nearby.
         mod = 0.5 * (self.modulation[self.src] + self.modulation[self.dst])
-        delta_w = self.eta * mod * x_u * x_v - self.lam * self.w
-        delta_w = torch.where(self.frozen, torch.zeros_like(delta_w), delta_w)
-        w_raw = self.w + delta_w
-        if self.use_hard_clip:
-            w_clamped = w_raw.clamp(min=0.0, max=self.max_weight)
-        else:
-            w_clamped = w_raw.clamp(min=0.0)
-        clip_hits += int((w_clamped != w_raw).sum().item())
+        w_clamped, delta_w, rule_clip_hits = self.learning_rule.update_weights(
+            self.w, x_u, x_v, mod, self.frozen, self.eta, self.lam, self.use_hard_clip, self.max_weight)
+        clip_hits += rule_clip_hits
 
         # Per-source-node outgoing-weight normalize: scale = min(1, 2.0
         # / (mean(w_out)+eps)) — only shrinks when the mean EXCEEDS 2.0,
@@ -507,6 +509,14 @@ class ESGRGraph:
         # older saves predate the split-budget kWTA -- default to None
         # (disabled), identical to their original behavior.
         g.split_sparsity_at = data.get("split_sparsity_at", None)
+        # learning_rule is never persisted (it's stateless code, not
+        # data) -- every load gets the default HebbianLearning(), same
+        # as every graph ever saved actually used. Real bug found by
+        # testing: load_json() builds via __new__(), bypassing
+        # __init__() entirely, so this was missing outright until now,
+        # not just defaulted -- any tick() on a loaded graph crashed
+        # with AttributeError.
+        g.learning_rule = HebbianLearning()
         g.contradiction_pairs = [tuple(p) for p in data["contradiction_pairs"]]
         edges = data["edges"]
         g.src = torch.tensor([e["src"] for e in edges], dtype=torch.long)

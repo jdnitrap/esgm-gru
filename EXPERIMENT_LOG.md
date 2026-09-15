@@ -608,3 +608,93 @@ Full test suite (`test_graph_sanity`, `test_fact_gate`,
 `test_integration_stress`, `test_sequence`, `test_generate_bytes`,
 `test_word_generation`, `test_word_generation_deep`, `test_dialogue`)
 re-run clean after all five changes.
+
+**One more real bug found immediately after, by live testing via
+`shell.py` rather than a unit test:** `hub_node_ids()`'s free-slot
+exclusion set (used by `shell.py`'s `tile` command and
+`expand_vocab.auto_expand_vocab()` to avoid reassigning a hub node to a
+new word) only ever read `grammar_extra_hubs.json`, never
+`discovered_dimensions.json` -- so `tile zephyr` reassigned node 621
+(`DISCOVERED_ADJECTIVE_LIKE`'s hub, with 5 confirmed word edges already
+wired into it) to a brand-new, unrelated word tile. Same class of
+collision this function already exists to prevent for grammar_extra
+hubs, just missing the newer file. Corrupted state was caught before
+`save`, restored from a pre-test backup, never persisted. Fixed by
+having `hub_node_ids()` build on the same `load_hub_ids()` merge
+`head.py`'s tag table now reads from, so both sources are covered in
+one place instead of two parallel exclusion lists. Verified: 621/622
+now correctly excluded; re-running the exact `tile zephyr` command
+grows a genuinely new node instead of colliding.
+
+## 2026-09-14 (session 4) — learning rule modularized; Oja's rule tried
+and rejected as the default, kept as a tested option
+
+**`graph.py`'s weight-update formula extracted into `learning_rules.py`
+(new file: `LearningRule` base class, `HebbianLearning`).** Previously
+the Hebbian formula was hardcoded inline inside `tick()`, alongside
+activation dynamics, k-WTA sparsity, and contradiction handling --
+trying a different rule meant forking the whole file. `ESGRGraph`
+gained a `learning_rule` constructor param (default `None` ->
+`HebbianLearning()`, so every existing caller is unaffected).
+**Verified byte-for-byte identical to the pre-refactor hardcoded
+formula**: captured a golden reference (50 ticks, fixed seed/stimulus,
+`w_sum`/`tau_sum`/full per-tick stats) before touching `tick()`, and
+confirmed exact equality after.
+
+**Real bug found by testing while verifying the refactor:**
+`ESGRGraph.load_json()` builds via `__new__()`, bypassing `__init__()`
+entirely -- it never set `learning_rule` on a loaded graph, so any
+`tick()` on a graph loaded from `graph.json` crashed with
+`AttributeError`. This broke `test_integration_stress.py` and
+`test_sequence.py` immediately (both load the real graph). Fixed by
+setting `g.learning_rule = HebbianLearning()` in `load_json()`,
+matching the same "older saves predate X, default to old behavior"
+pattern this function already uses for `modulation_decay`/
+`max_activation_rate`/`split_sparsity_at`. Now regression-tested in
+`test_learning_rules.py`.
+
+**New `test_learning_rules.py`** (permanent, not a one-off script):
+(1) default rule matches the golden pre-refactor reference exactly,
+(2) a genuinely different rule (`FrozenLearning`, a null-op used only
+to prove the plug point is real) swapped in at construction actually
+changes `tick()`'s output -- proves this is really pluggable, not an
+unused abstraction, (3) the `load_json()` bug above, regression-tested.
+
+**Oja's rule (Oja, 1982) implemented as `OjaLearning`, then measured
+against Hebbian on the real, accumulated `graph.json`** -- identical
+seed and mixed-stimulus schedule as `test_integration_stress.py`
+(bytes, MDBE-linked bytes, category nodes, word tiles, role hubs
+rotating every tick), 1500 ticks:
+
+| | Hebbian (default) | Oja |
+|---|---|---|
+| NaN ticks | 0 | 0 |
+| Max \|weight\| reached | 64.93 | **15.68** |
+| Final weight sum | 6506.0 | 4320.8 |
+| Weight-floor (>=0) clamp hits | **0** | **1700** |
+| Frozen structure disturbed | 0 | 0 |
+| Runtime (1500 ticks) | 0.65s | 0.65s |
+
+Oja's self-limiting property is real and measured: max weight
+magnitude dropped >4x under identical stimulus, directly relevant to
+the class of runaway-weight bug this project already hit once
+(`w=536`, supervised_step()). **But it is not a clean win**: Oja's
+decay term (`-w*x_v^2`) overshot below zero and needed the
+non-negativity floor 1700 times in the same run Hebbian never needed
+it once -- a real cost, not just a footnote, and evidence its
+dynamics may be less stable at this graph's current `eta` than the
+aggregate stats alone suggest.
+
+**Decision: kept as a tested, available option, NOT switched to be
+the default.** Every existing tuned constant in this system
+(`eta`, `lam`, `max_weight`, the three-factor modulation amounts/decay,
+the head checkpoint's warm-start assumptions) was calibrated against
+Hebbian over many real sessions; switching the default is a much
+bigger change than trying a rule, and nothing here is responding to a
+live, active problem the way the original `w=536` bug was. If a real
+weight-runaway problem resurfaces, or someone wants to run the larger,
+real-training-data comparison this one synthetic-stimulus run doesn't
+cover, `OjaLearning` is sitting there, tested, ready to try.
+
+Full test suite (all 9 files including the new `test_learning_rules.py`)
+re-run clean.
