@@ -122,7 +122,7 @@ though the specific combination is original to this project.
 | Three-factor / reward-modulated plasticity | Frémaux, N. & Gerstner, W. (2016), "Neuromodulated STDP and Theory of Three-Factor Learning Rules," *Frontiers in Neural Circuits* |
 | Fact-gating / contradiction suspension | Doyle, J. (1979), "A Truth Maintenance System," *Artificial Intelligence* 12(3) |
 | Local-rule vs. backprop ceiling (grounds this project's own honesty about that tradeoff, below) | Lillicrap, T.P. et al. (2020), "Backpropagation and the Brain," *Nature Reviews Neuroscience* |
-| Oja's rule (implemented and measured, not the default — see `learning_rules.py`) | Oja, E. (1982), "A Simplified Neuron Model as a Principal Component Analyzer," *J. Mathematical Biology* |
+| Oja's rule (implemented, properly bundled with its own eta, and measured — see `learning_rules.py` and `EXPERIMENT_LOG.md`) | Oja, E. (1982), "A Simplified Neuron Model as a Principal Component Analyzer," *J. Mathematical Biology* |
 | GRU (this repo's Generator implementation) | Cho, K. et al. (2014), "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation," arXiv |
 | xLSTM (named alternative, not implemented in this repo) | Beck, M. et al. (2024), "xLSTM: Extended Long Short-Term Memory," arXiv |
 | BCM rule (candidate Hebbian variant, not yet used) | Bienenstock, Cooper & Munro (1982), *J. Neuroscience* |
@@ -227,13 +227,22 @@ ESGM-CARBIDE fork possible without touching this component at all.
   (fixed 2026-09-14, session 4; previously hardcoded inline inside
   `tick()`). `HebbianLearning` is the default and exactly what this
   graph has always run — verified byte-for-byte identical to the
-  pre-refactor formula. `OjaLearning` (Oja, 1982) is implemented and
-  measured against Hebbian on the real graph (real self-limiting
-  effect: max weight dropped >4x under identical stimulus, but needed
-  the non-negativity floor 1700 times in a run Hebbian never needed it
-  once) — kept as a tested option, not switched to be the default,
-  since everything else in this system is calibrated against Hebbian.
-  See `EXPERIMENT_LOG.md` for the full comparison.
+  pre-refactor formula. Each rule owns its own tuning constants
+  (`eta`/`lam`) and an optional `normalize()` post-update hook, rather
+  than borrowing the graph's — a real gap the user found (session 5):
+  the first version passed the graph's own `eta`/`lam` into whichever
+  rule was plugged in, and ran Hebbian's own external normalization
+  step regardless of which rule was active, so "swapping" a rule
+  wasn't actually testing that rule on its own terms. `OjaLearning`
+  (Oja, 1982), corrected this way and given its own tuned `eta`, needed
+  neither the non-negativity floor nor any external rescue mechanism
+  at all on the real graph, while Hebbian's own `normalize()` fired
+  31,234 times over the same run — the opposite conclusion from the
+  first, flawed comparison. Still kept as a tested option, not switched
+  to be the default, but now purely because every other tuned constant
+  in this system was calibrated against Hebbian, not because Oja
+  underperformed. See `EXPERIMENT_LOG.md` for both the flawed and the
+  corrected comparison.
 - **`fact_gate.py`, `byte_identity.py`, `word_structure.py`,
   `decode.py`** — the propose/confirm pipeline (optionally
   `auto_confirm=True`, off by default), byte- and word-level structural

@@ -32,10 +32,15 @@ class ESGRGraph:
         self.max_weight = max_weight
         self.use_hard_clip = use_hard_clip
         # Pluggable weight-update rule -- see learning_rules.py. None
-        # (default) is HebbianLearning(), the exact rule this graph
-        # always used; every existing caller is unaffected unless it
-        # opts into a different rule.
-        self.learning_rule = learning_rule if learning_rule is not None else HebbianLearning()
+        # (default) builds HebbianLearning from THIS graph's own
+        # eta/lam constructor args, so ESGRGraph(eta=X, lam=Y) still
+        # behaves exactly as before -- every existing caller is
+        # unaffected unless it opts into an explicit learning_rule,
+        # in which case that rule's own constants apply instead (self.
+        # eta/self.lam above still get set either way, for graph.json
+        # round-trip fidelity, but only matter to computation when no
+        # explicit rule is given).
+        self.learning_rule = learning_rule if learning_rule is not None else HebbianLearning(eta=eta, lam=lam)
 
         pairs = set()
         src_list, dst_list = [], []
@@ -382,24 +387,14 @@ class ESGRGraph:
         # or rejected nearby.
         mod = 0.5 * (self.modulation[self.src] + self.modulation[self.dst])
         w_clamped, delta_w, rule_clip_hits = self.learning_rule.update_weights(
-            self.w, x_u, x_v, mod, self.frozen, self.eta, self.lam, self.use_hard_clip, self.max_weight)
+            self.w, x_u, x_v, mod, self.frozen, self.use_hard_clip, self.max_weight)
         clip_hits += rule_clip_hits
 
-        # Per-source-node outgoing-weight normalize: scale = min(1, 2.0
-        # / (mean(w_out)+eps)) — only shrinks when the mean EXCEEDS 2.0,
-        # otherwise leaves weights untouched (typical mass can sit near
-        # 2, not forced down to <=1). Frozen edges excluded/untouched.
-        out_degree = torch.zeros(self.n)
-        out_degree.index_add_(0, self.src, torch.ones_like(self.src, dtype=torch.float))
-        w_for_norm = torch.where(self.frozen, torch.zeros_like(w_clamped), w_clamped)
-        w_sum = torch.zeros(self.n)
-        w_sum.index_add_(0, self.src, w_for_norm)
-        mean_w_out = torch.where(out_degree > 0, w_sum / out_degree.clamp(min=1), torch.zeros(self.n))
-        scale = torch.clamp(2.0 / (mean_w_out + 1e-8), max=1.0)
-        w_norm_fires = int((scale < 1.0 - 1e-9).sum().item())
-        per_edge_scale = scale[self.src]
-        w_final = torch.where(self.frozen, w_clamped, w_clamped * per_edge_scale)
-        self.w = w_final
+        # Rule-specific post-update step (e.g. HebbianLearning's
+        # per-node outgoing-weight normalize) -- see
+        # learning_rules.py's LearningRule.normalize(). A no-op for a
+        # rule that doesn't override it.
+        self.w, w_norm_fires = self.learning_rule.normalize(w_clamped, self.frozen, self.src, self.n)
 
         if torch.isnan(self.w).any() or torch.isnan(x_new).any():
             nan_count += 1  # detected honestly, never masked with nan_to_num
@@ -467,8 +462,19 @@ class ESGRGraph:
                 "mean_modulation": self.modulation.mean().item()}
 
     def save_json(self, path):
+        # Persist the ACTIVE rule's own eta/lam when it has them, not
+        # self.eta/self.lam (which only reflect this graph's
+        # construction-time args and can silently diverge from what's
+        # actually driving computation once a differently-tuned rule
+        # is plugged in -- real gap found by testing: a HebbianLearning
+        # constructed with eta=0.05 while the graph itself defaulted to
+        # eta=0.01 saved/reloaded as 0.01, silently losing the real
+        # value). Falls back to self.eta/self.lam for a rule that
+        # doesn't have one (e.g. OjaLearning has no lam at all).
+        eta = getattr(self.learning_rule, "eta", self.eta)
+        lam = getattr(self.learning_rule, "lam", self.lam)
         data = {
-            "n": self.n, "eta": self.eta, "lam": self.lam,
+            "n": self.n, "eta": eta, "lam": lam,
             "active_fraction": self.active_fraction,
             "max_activation": self.max_activation, "max_weight": self.max_weight,
             "use_hard_clip": self.use_hard_clip,
@@ -510,13 +516,15 @@ class ESGRGraph:
         # (disabled), identical to their original behavior.
         g.split_sparsity_at = data.get("split_sparsity_at", None)
         # learning_rule is never persisted (it's stateless code, not
-        # data) -- every load gets the default HebbianLearning(), same
-        # as every graph ever saved actually used. Real bug found by
-        # testing: load_json() builds via __new__(), bypassing
-        # __init__() entirely, so this was missing outright until now,
-        # not just defaulted -- any tick() on a loaded graph crashed
-        # with AttributeError.
-        g.learning_rule = HebbianLearning()
+        # data) -- every load reconstructs HebbianLearning from THIS
+        # file's own saved eta/lam (not the class defaults), so a graph
+        # ever saved with non-default eta/lam round-trips correctly
+        # instead of silently reverting to HebbianLearning()'s own
+        # defaults. Real bug found by testing: load_json() builds via
+        # __new__(), bypassing __init__() entirely, so this was missing
+        # outright until now, not just defaulted -- any tick() on a
+        # loaded graph crashed with AttributeError.
+        g.learning_rule = HebbianLearning(eta=g.eta, lam=g.lam)
         g.contradiction_pairs = [tuple(p) for p in data["contradiction_pairs"]]
         edges = data["edges"]
         g.src = torch.tensor([e["src"] for e in edges], dtype=torch.long)

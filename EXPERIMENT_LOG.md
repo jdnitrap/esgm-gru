@@ -698,3 +698,83 @@ cover, `OjaLearning` is sitting there, tested, ready to try.
 
 Full test suite (all 9 files including the new `test_learning_rules.py`)
 re-run clean.
+
+## 2026-09-15 (session 5) — the Oja comparison above was flawed; eta/lam
+made genuinely rule-owned, and the corrected comparison tells a
+materially different story
+
+**Real gap found by the user, not a test:** "if one piece was
+swappable but everything else depended on that piece" — the
+`LearningRule` contract above only isolated the raw `Δw` formula.
+`eta`/`lam` were still passed in from the graph on every call, and the
+per-node outgoing-weight normalization (`w_norm_fires`) still ran
+unconditionally in `tick()` regardless of which rule was active. So
+the session-4 comparison wasn't really testing Oja's rule — it was
+testing "Oja's formula, run with Hebbian's tuned `eta`, under
+Hebbian's own external rescue mechanism." **That comparison's
+conclusion ("Oja needed the floor-clamp 1700 times, a real cost") is
+retracted, not just superseded.**
+
+**Fixed properly:** `eta`/`lam` moved to be constructor args each
+`LearningRule` owns itself (`HebbianLearning(eta=.., lam=..)`,
+`OjaLearning(eta=..)` — Oja takes no `lam` at all now, since its own
+`w*x_v^2` term IS the decay, not a supplement to a separate one).
+`LearningRule` gained an optional `normalize()` hook (default: no-op)
+that `HebbianLearning` overrides with the exact per-node rescale it
+always had; `OjaLearning` doesn't override it, so nothing runs on top
+of Oja's own dynamics unless it asks for it. `ESGRGraph.__init__`'s
+`eta`/`lam` args still build the default `HebbianLearning` exactly as
+before (byte-for-byte re-verified against the same golden reference).
+
+**A second real bug found while fixing the first:** `save_json()`
+persisted `self.eta`/`self.lam` (the graph's construction-time
+values), not the actually-active rule's `eta`/`lam` -- so a
+`HebbianLearning(eta=0.05)` plugged into a graph constructed with the
+default `eta=0.01` would silently save and reload as `0.01`, losing
+the real value. Fixed to read from `self.learning_rule` first,
+falling back to the graph's own value only for a rule that doesn't
+have one. Regression-tested in `test_learning_rules.py` (6 checks now,
+up from 3: golden-reference match, a real swap changing behavior, the
+`load_json()` crash fix, a rule's own `eta` genuinely overriding the
+graph's, that override round-tripping through save/load correctly,
+and `normalize()` actually firing under real stimulus).
+
+**The corrected Hebbian-vs-Oja comparison** (same real `graph.json`,
+same 1500-tick mixed-stimulus schedule as before), with Oja given its
+own `eta` instead of Hebbian's:
+
+| Oja `eta` | max \|weight\| | floor-clamp hits | NaN |
+|---|---|---|---|
+| 0.01 (Hebbian's borrowed value — the old, flawed test) | 15.68 | **1700** | 0 |
+| 0.005 | 15.68 | **0** | 0 |
+| 0.001 | 15.68 | **0** | 0 |
+| 0.0005 | 15.68 | **0** | 0 |
+| 0.0001 | 15.68 | **0** | 0 |
+
+The floor-clamp problem disappears entirely the moment Oja isn't
+forced to use Hebbian's `eta`. `max_w_seen` lands on exactly the same
+value (15.683) across every `eta` tested — a real, explicable
+property, not a coincidence: Oja's fixed point (`Δw=0` → `w* =
+x_u/x_v`) doesn't depend on `eta` at all; `eta` only sets step size on
+the way there. At `eta=0.01` each step overshoots that equilibrium and
+has to correct back below zero, repeatedly hitting the floor; at any
+smaller `eta` it converges smoothly, same destination, no overshoot.
+
+**One more honest number this run surfaced that the first comparison
+never tracked:** Hebbian's own `normalize()` (its external per-node
+rescue mechanism) fired **31,234 times** over the same 1500 ticks.
+Hebbian isn't naturally stable either — it leans on its own external
+patch constantly. Properly-tuned Oja needed neither that patch nor the
+floor-clamp, at any of the five `eta` values tried.
+
+**Revised conclusion:** the original "keep Hebbian, Oja seemed less
+stable" reasoning is wrong and retracted. Properly bundled, Oja looks
+more self-sufficient than Hebbian on this graph, not less. **The
+decision to keep `HebbianLearning` as the default is unchanged, but
+now rests entirely on the reason the user gave directly — every other
+tuned constant in this system was calibrated against Hebbian over many
+real sessions, and switching the default is a bigger change than
+trying a rule — not on any performance shortfall of Oja's, which this
+corrected run does not show.**
+
+Full test suite (all 9 files) re-run clean after both fixes.
