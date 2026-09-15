@@ -194,25 +194,26 @@ def wire_grammar_extra(graph, tiles_path="tiles.json"):
     return hub_ids, n_edges
 
 
-def hub_node_ids(hubs_path="grammar_extra_hubs.json"):
-    """All node ids used as hubs across every dimension in this file,
-    read from the saved hub_ids (grammar_extra_hubs.json). Unlike
-    CATEGORY_OFFSET/ROLE_OFFSET, these are NOT a fixed, predictable
-    range -- grow() allocates them wherever the graph happened to be
-    sized when wire_grammar_extra() last ran -- so anything that
-    computes a "reserved/used node id" set (shell.py's `tile` command,
-    expand_vocab.auto_expand_vocab()) has to read this file to know
-    what to avoid. Real bug found by testing: without this,
-    auto_expand_vocab() silently reassigned 13 of 15 newly mined real
-    words onto the exact node ids the TENSE/NUMBER/ANIMACY/DISCOURSE/
-    SYNTAX/MORPHOLOGY hubs already live at. Returns an empty set if the
-    file doesn't exist yet (grammar_extra never wired)."""
-    import json
-    import os
-    if not os.path.exists(hubs_path):
-        return set()
-    with open(hubs_path) as f:
-        hub_ids = json.load(f)
+def hub_node_ids(hubs_path="grammar_extra_hubs.json", discovered_path="discovered_dimensions.json"):
+    """All node ids used as hubs across every dimension in this file
+    PLUS every human-confirmed discover_dimension.py cluster, via the
+    same load_hub_ids() merge head.py's tag table now reads from.
+    Unlike CATEGORY_OFFSET/ROLE_OFFSET, these are NOT a fixed,
+    predictable range -- grow() allocates them wherever the graph
+    happened to be sized when wire_grammar_extra()/confirm_dimension()
+    last ran -- so anything that computes a "reserved/used node id" set
+    (shell.py's `tile` command, expand_vocab.auto_expand_vocab()) has
+    to read this to know what to avoid. Real bug found by testing (2x):
+    (1) without this at all, auto_expand_vocab() silently reassigned 13
+    of 15 newly mined real words onto the exact node ids the
+    TENSE/NUMBER/ANIMACY/DISCOURSE/SYNTAX/MORPHOLOGY hubs already live
+    at; (2) after that fix but before this one only covered
+    grammar_extra_hubs.json, shell.py's `tile` command reassigned node
+    621 (DISCOVERED_ADJECTIVE_LIKE's hub) to a brand-new word tile,
+    silently double-using a node that 5 other words already had a
+    confirmed structural edge into. Returns an empty dict's worth of
+    ids (empty set) if neither file exists yet."""
+    hub_ids = load_hub_ids(hubs_path, discovered_path)
     return {nid for dim in hub_ids.values() for nid in dim.values()}
 
 
